@@ -1,0 +1,263 @@
+<!DOCTYPE html><html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Enregistreur → Analyse → Binaire (STÉRÉO)</title>
+<style>
+  :root{--bg:#0b1020;--fg:#e9eef7;--muted:#9fb3c8;--acc:#5bbcff;--card:#121a33}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
+  header{padding:16px 20px;border-bottom:1px solid #1e284e;background:linear-gradient(180deg,#0e1731,transparent)}
+  h1{margin:0 0 6px;font-size:20px}
+  p.top{margin:0;color:var(--muted)}
+  main{display:grid;grid-template-columns:1.2fr 1fr;gap:16px;padding:16px;max-width:1200px;margin:auto}
+  .card{background:var(--card);border:1px solid #1e284e;border-radius:16px;box-shadow:0 10px 24px rgba(0,0,0,.25);overflow:hidden}
+  .card h2{margin:0;padding:12px 14px;border-bottom:1px solid #1e284e;font-size:16px;background:#0e1731}
+  .card .content{padding:12px 14px}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  button{background:var(--acc);border:none;color:#001428;padding:10px 14px;border-radius:12px;font-weight:700;cursor:pointer}
+  button.secondary{background:#233258;color:var(--fg)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .info{color:var(--muted);font-size:14px}
+  canvas{width:100%;height:140px;background:#0a0f22;border:1px solid #1e284e;border-radius:12px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .stat{flex:1;min-width:140px;background:#0e1731;border:1px solid #1e284e;border-radius:12px;padding:10px}
+  .stat b{display:block;font-size:12px;color:var(--muted)}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{padding:6px 8px;border-bottom:1px solid #1e284e;white-space:nowrap}
+  tbody{display:block;max-height:280px;overflow:auto}
+  thead, tbody tr{display:table;width:100%;table-layout:fixed}
+  code{background:#0a0f22;border:1px solid #1e284e;border-radius:6px;padding:2px 6px}
+  .debug{margin-top:8px;font-size:12px;color:#ffcc88}
+</style>
+</head>
+<body>
+  <header>
+    <h1>🎤 Enregistreur → Analyse → Binaire <span style="opacity:.8">(STÉRÉO)</span></h1>
+    <p class="top">Capture stéréo, visualise Gauche/Droite, exporte CSV/WAV en PCM 16‑bits, affiche les bits des premiers échantillons.</p>
+  </header>  <main>
+    <section class="card">
+      <h2>1) Capture & visualisation</h2>
+      <div class="content">
+        <div class="controls">
+          <button id="btnRec">▶️ Démarrer</button>
+          <button id="btnStop" class="secondary" disabled>⏹️ Arrêter</button>
+          <button id="btnPlay" class="secondary" disabled>🔊 Écouter</button>
+          <button id="btnClear" class="secondary" disabled>🧹 Effacer</button>
+          <button id="btnTone" class="secondary">🎶 Bip 440 Hz (1 s)</button>
+          <button id="btnNoise" class="secondary">🔊 Bruit blanc (1 s)</button>
+          <button id="btnTest" class="secondary">🎤 Test micro</button>
+        </div>
+        <p class="info" id="status">Statut : prêt.</p>
+        <div class="row">
+          <div class="stat"><b>Fréquence d’échantillonnage</b><span id="statRate">—</span></div>
+          <div class="stat"><b>Durée capturée</b><span id="statDur">0.00 s</span></div>
+          <div class="stat"><b>Échantillons</b><span id="statCount">0</span></div>
+          <div class="stat"><b>Niveau instantané</b><span id="statLevel">— dBFS</span></div>
+        </div>
+          <div class="stat"><b>Durée capturée</b><span id="statDur">0.00 s</span></div>
+          <div class="stat"><b>Échantillons</b><span id="statCount">0</span></div>
+        </div>
+        <div class="grid">
+          <div>
+            <div class="info">Canal gauche (L)</div>
+            <canvas id="scopeL" width="900" height="140"></canvas>
+          </div>
+          <div>
+            <div class="info">Canal droit (R)</div>
+            <canvas id="scopeR" width="900" height="140"></canvas>
+          </div>
+        </div>
+        <div class="debug" id="dbg">Debug : —</div>
+      </div>
+    </section><section class="card">
+  <h2>2) Analyse & export</h2>
+  <div class="content">
+    <div class="row" style="margin-bottom:10px">
+      <button id="btnBits" disabled>🧮 Afficher bits (255)</button>
+      <button id="btnCsv" class="secondary" disabled>⬇️ Export CSV (L,R)</button>
+      <button id="btnWav" class="secondary" disabled>⬇️ Export WAV</button>
+    </div>
+    <div id="bitsBox" style="display:none">
+      <table>
+        <thead>
+          <tr><th>#</th><th>Float L</th><th>Int16 L</th><th>Bits L</th><th>Float R</th><th>Int16 R</th><th>Bits R</th></tr>
+        </thead>
+        <tbody id="bitsTbody"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+  </main><script>
+(()=>{
+  // ====== ÉTAT GLOBAL ======
+  let audioCtx=null, analyserL=null, analyserR=null, source=null, stream=null;
+  let chunksL=[], chunksR=[], collecting=false, sampleRate=0;
+  let workletNode=null; // AudioWorklet (si dispo)
+
+  // Snapshot figé pour lecture/export
+  let lastCapture=null; // { floatL, floatR, pcm16L, pcm16R, wav }
+
+  // ====== RÉFÉRENCES UI ======
+  const $=id=>document.getElementById(id);
+  const status=$('status'), rate=$('statRate'), dur=$('statDur'), count=$('statCount');
+  const scopeL=$('scopeL'), scopeR=$('scopeR');
+  const ctxL=scopeL.getContext('2d'), ctxR=scopeR.getContext('2d');
+  const bitsBox=$('bitsBox'), bitsTbody=$('bitsTbody');
+  const statLevel=$('statLevel');
+  const dbg=$('dbg');
+
+  function setStatus(t){status.textContent='Statut : '+t;}
+  function totalSamples(){return chunksL.reduce((n,a)=>n+a.length,0);}  
+  function enable(en){['btnPlay','btnBits','btnCsv','btnWav','btnClear'].forEach(id=>$(id).disabled=!en);}  
+  function updateStats(){const n=totalSamples(); count.textContent=n.toLocaleString('fr-FR'); dur.textContent=(n&&sampleRate?(n/sampleRate).toFixed(2):'0.00')+' s';}
+  function hasData(){return totalSamples()>0 || !!lastCapture;}
+
+  // ====== OSCILLO ======
+  function drawScope(an,ctx){
+    const d=new Uint8Array(an.fftSize);
+    an.getByteTimeDomainData(d);
+    ctx.fillStyle='#0a0f22';ctx.fillRect(0,0,ctx.canvas.width,ctx.canvas.height);
+    ctx.beginPath();ctx.strokeStyle='#5bbcff';ctx.lineWidth=2;
+    const step=ctx.canvas.width/d.length;let x=0;
+    for(let i=0;i<d.length;i++){const y=(d[i]/255)*ctx.canvas.height; if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y); x+=step;}
+    ctx.stroke();
+  }
+  function loop(){ if(collecting){ drawScope(analyserL,ctxL); drawScope(analyserR,ctxR); requestAnimationFrame(loop);} }
+
+  // ====== AUDIOWORKLET (fiable mobile) ======
+  async function ensureContext(){
+    if(!audioCtx){ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); sampleRate=audioCtx.sampleRate; rate.textContent=sampleRate.toFixed(0)+' Hz'; }
+    if(audioCtx.state==='suspended') await audioCtx.resume();
+    if('audioWorklet' in audioCtx && !workletNode){
+      const code=`class PCMWorklet extends AudioWorkletProcessor{process(inputs){const i=inputs[0]; if(i&&i.length){ const L=i[0]||new Float32Array(128); const R=i[1]||i[0]||new Float32Array(128); this.port.postMessage({l:Array.from(L), r:Array.from(R)});} return true; }} registerProcessor('pcm-worklet', PCMWorklet);`;
+      const blob=new Blob([code],{type:'application/javascript'});
+      const url=URL.createObjectURL(blob);
+      await audioCtx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      workletNode=new AudioWorkletNode(audioCtx,'pcm-worklet',{numberOfInputs:1,numberOfOutputs:1,channelCount:2,channelCountMode:'explicit',channelInterpretation:'speakers'});
+      workletNode.port.onmessage=(e)=>{ if(!collecting) return; const L=new Float32Array(e.data.l); const R=new Float32Array(e.data.r); chunksL.push(L); chunksR.push(R); updateStats(); };
+    }
+  }
+    if(audioCtx.state==='suspended') await audioCtx.resume();
+    if('audioWorklet' in audioCtx && !workletNode){
+      const code=`class PCMWorklet extends AudioWorkletProcessor{process(inputs){const i=inputs[0]; if(i&&i.length){ const L=i[0]; const R=i[1]||i[0]; this.port.postMessage({l:Array.from(L), r:Array.from(R)}); } return true; }} registerProcessor('pcm-worklet', PCMWorklet);`;
+      const blob=new Blob([code],{type:'application/javascript'});
+      const url=URL.createObjectURL(blob);
+      await audioCtx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      workletNode=new AudioWorkletNode(audioCtx,'pcm-worklet');
+      workletNode.port.onmessage=(e)=>{
+        const L=new Float32Array(e.data.l);
+        const R=new Float32Array(e.data.r);
+        chunksL.push(L); chunksR.push(R); updateStats();
+      };
+    }
+  }
+
+  // ====== CAPTURE ======
+  $('btnRec').onclick=async()=>{
+    // Alerte si ouvert en file:// (micro souvent bloqué)
+    if(location.protocol === 'file:'){
+      setStatus('Attention : fichier ouvert en file:// — le micro peut être bloqué. Ouvre via https ou localhost.');
+    }
+    try{
+      await ensureContext();
+      stream=await navigator.mediaDevices.getUserMedia({
+        audio:{
+          channelCount:2,
+          echoCancellation:false,
+          noiseSuppression:false,
+          autoGainControl:false
+        }
+      });
+      source=audioCtx.createMediaStreamSource(stream);
+      const splitter=audioCtx.createChannelSplitter(2);
+      source.connect(splitter);
+      analyserL=audioCtx.createAnalyser(); analyserR=audioCtx.createAnalyser();
+      splitter.connect(analyserL,0); splitter.connect(analyserR,1);
+      if(workletNode){
+        // branche directe vers le worklet (tous canaux)
+        source.connect(workletNode);
+        workletNode.connect(audioCtx.destination);
+      } // requis par certains navigateurs
+      } else {
+        // Fallback ScriptProcessor
+        const proc=audioCtx.createScriptProcessor(4096,2,2);
+        proc.onaudioprocess=e=>{
+          if(!collecting) return;
+          const L=e.inputBuffer.getChannelData(0);
+          const R=e.inputBuffer.getChannelData(1)||L;
+          chunksL.push(new Float32Array(L));
+          chunksR.push(new Float32Array(R));
+          updateStats();
+        };
+        source.connect(proc); proc.connect(audioCtx.destination);
+      }
+
+      collecting=true; setStatus('enregistrement…');
+      $('btnRec').disabled=true; $('btnStop').disabled=false; enable(false);
+      requestAnimationFrame(loop);
+    }catch(err){ setStatus('erreur micro : '+err.message); }
+  };
+
+  $('btnStop').onclick=()=>{
+    collecting=false;
+    $('btnStop').disabled=true; $('btnRec').disabled=false;
+    if(source) source.disconnect();
+    if(stream) stream.getTracks().forEach(t=>t.stop());
+    freezeCapture(); // snapshot cohérent
+    enable(true); setStatus('capture terminée');
+    const n=lastCapture?.pcm16L?.length||0; dbg.textContent='Debug : snapshot='+n+' échantillons par canal';
+  };
+
+  $('btnClear').onclick=()=>{chunksL=[];chunksR=[];lastCapture=null;updateStats();enable(false);setStatus('tampon vidé.');dbg.textContent='Debug : —';};
+
+  // ====== GÉNÉRATEURS ======
+  $('btnTone').onclick=()=>{ ensureContext(); const N=Math.floor(sampleRate*1.0), w=2*Math.PI*440; const L=new Float32Array(N),R=new Float32Array(N); for(let i=0;i<N;i++){ const s=Math.sin(w*i/sampleRate)*0.6; L[i]=s; R[i]=s; } chunksL.push(L); chunksR.push(R); lastCapture=null; updateStats(); enable(true); setStatus('bip ajouté'); };
+  $('btnNoise').onclick=()=>{ ensureContext(); const N=Math.floor(sampleRate*1.0); const L=new Float32Array(N),R=new Float32Array(N); for(let i=0;i<N;i++){ const s=(Math.random()*2-1)*0.4; L[i]=s; R[i]=s; } chunksL.push(L); chunksR.push(R); lastCapture=null; updateStats(); enable(true); setStatus('bruit blanc ajouté'); };
+
+  // ====== TEST MICRO (niveau en dBFS) ======
+  let levelRAF=null; let levelAnalyser=null;
+  function levelLoop(){
+    if(!levelAnalyser) return;
+    const buf=new Float32Array(levelAnalyser.fftSize);
+    levelAnalyser.getFloatTimeDomainData(buf);
+    let sum=0; for(let i=0;i<buf.length;i++){ sum+=buf[i]*buf[i]; }
+    const rms=Math.sqrt(sum/buf.length);
+    const db = rms>0 ? (20*Math.log10(rms)) : -120;
+    statLevel.textContent = db.toFixed(1)+' dBFS';
+    levelRAF = requestAnimationFrame(levelLoop);
+  }
+  $('btnTest').onclick=async()=>{
+    try{
+      await ensureContext();
+      const st=await navigator.mediaDevices.getUserMedia({audio:true});
+      const src=audioCtx.createMediaStreamSource(st);
+      levelAnalyser=audioCtx.createAnalyser(); levelAnalyser.fftSize=2048; src.connect(levelAnalyser);
+      if(levelRAF) cancelAnimationFrame(levelRAF); levelLoop();
+      setStatus('test micro actif : parle et regarde le niveau');
+    }catch(e){ setStatus('erreur test micro : '+e.message); }
+  };
+
+  // ====== LECTURE / BITS / EXPORT ======
+  $('btnPlay').onclick=()=>{ if(!hasData()){ alert('Aucune donnée.'); return; } const {wav}=getCapture(); const audio=new Audio(URL.createObjectURL(wav)); audio.play(); };
+  $('btnBits').onclick=()=>{ if(!hasData()){ alert('Aucune donnée.'); return; } const {pcm16L,pcm16R,floatL,floatR}=getCapture(); bitsTbody.innerHTML=''; const N=Math.min(255,pcm16L.length); for(let i=0;i<N;i++){ const bL=(pcm16L[i]&0xFFFF).toString(2).padStart(16,'0'); const bR=(pcm16R[i]&0xFFFF).toString(2).padStart(16,'0'); bitsTbody.innerHTML+=`<tr><td>${i}</td><td>${floatL[i].toFixed(6)}</td><td>${pcm16L[i]}</td><td><code>${bL}</code></td><td>${floatR[i].toFixed(6)}</td><td>${pcm16R[i]}</td><td><code>${bR}</code></td></tr>`; } bitsBox.style.display='block'; };
+  $('btnCsv').onclick=()=>{ if(!hasData()){ alert('Fichier vide : enregistre ou fais un bip.'); return; } const {pcm16L,pcm16R}=getCapture(); let csv='index,int16_L,int16_R
+'; const N=Math.min(pcm16L.length,pcm16R.length); for(let i=0;i<N;i++) csv+=`${i},${pcm16L[i]},${pcm16R[i]}
+`; download(new Blob([csv],{type:'text/csv'}),'audio_stereo.csv'); };
+  $('btnWav').onclick=()=>{ if(!hasData()){ alert('Aucune donnée.'); return; } const {wav}=getCapture(); download(wav,'audio_stereo.wav'); };
+
+  // ====== SNAPSHOT & UTILITAIRES AUDIO ======
+  function freezeCapture(){ const floatL=interleaveFloat32(chunksL); const floatR=interleaveFloat32(chunksR.length?chunksR:chunksL); const pcm16L=floatToInt16(floatL); const pcm16R=floatToInt16(floatR); const wav=toWav(pcm16L,pcm16R); lastCapture={floatL,floatR,pcm16L,pcm16R,wav}; }
+  function getCapture(){ if(lastCapture) return lastCapture; const floatL=interleaveFloat32(chunksL); const floatR=interleaveFloat32(chunksR.length?chunksR:chunksL); const pcm16L=floatToInt16(floatL); const pcm16R=floatToInt16(floatR); const wav=toWav(pcm16L,pcm16R); return {floatL,floatR,pcm16L,pcm16R,wav}; }
+
+  function interleaveFloat32(chunks){ const tot=chunks.reduce((n,a)=>n+a.length,0); const out=new Float32Array(tot); let o=0; for(const a of chunks){ out.set(a,o); o+=a.length; } return out; }
+  function floatToInt16(f){ const o=new Int16Array(f.length); for(let i=0;i<f.length;i++){ let s=Math.max(-1,Math.min(1,f[i])); o[i]= s<0 ? (s*0x8000) : (s*0x7FFF); } return o; }
+  function interleaveInt16(L,R){ const N=Math.min(L.length,R.length), out=new Int16Array(N*2); let j=0; for(let i=0;i<N;i++){ out[j++]=L[i]; out[j++]=R[i]; } return out; }
+  function toWav(L,R){ const ch=2,bps=2,align=ch*bps,byteRate=sampleRate*align; const inter=interleaveInt16(L,R); const dataSize=inter.length*bps; const buf=new ArrayBuffer(44+dataSize); const v=new DataView(buf); writeStr(v,0,'RIFF'); v.setUint32(4,36+dataSize,true); writeStr(v,8,'WAVE'); writeStr(v,12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,ch,true); v.setUint32(24,sampleRate,true); v.setUint32(28,byteRate,true); v.setUint16(32,align,true); v.setUint16(34,16,true); writeStr(v,36,'data'); v.setUint32(40,dataSize,true); let off=44; for(let i=0;i<inter.length;i++){ v.setInt16(off, inter[i], true); off+=2; } return new Blob([v],{type:'audio/wav'}); }
+  function writeStr(v,off,str){ for(let i=0;i<str.length;i++) v.setUint8(off+i, str.charCodeAt(i)); }
+  function download(blob,name){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1500); }
+})();
+</script></body>
+</html>
